@@ -900,7 +900,7 @@ func main() {
 				continue
 			}
 			ext := strings.ToLower(filepath.Ext(entry.Name()))
-			if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+			if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" || ext == ".bmp" {
 				files = append(files, entry.Name())
 			}
 		}

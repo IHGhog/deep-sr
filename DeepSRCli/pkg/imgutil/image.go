@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	_ "image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -15,6 +16,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 var rgbaPool = sync.Pool{
@@ -97,6 +102,34 @@ func imageToFloatRGB(img image.Image) ([]float32, int, int) {
 	return rgb, w, h
 }
 
+// decodeWithFFmpeg 当 Go 原生解码器无法解码时（例如部分非常规格式或复杂 WebP/AVIF）回退调用内置 FFmpeg 解码
+func decodeWithFFmpeg(path string) ([]float32, int, int, error) {
+	ffmpegBin := findBuiltinFFmpeg()
+	args := []string{
+		"-v", "error",
+		"-i", path,
+		"-c:v", "png",
+		"-f", "image2pipe",
+		"pipe:1",
+	}
+	cmd := exec.Command(ffmpegBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, 0, 0, err
+	}
+	img, _, err := image.Decode(stdout)
+	_ = cmd.Wait()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("ffmpeg decode error: %w", err)
+	}
+	rgb, w, h := imageToFloatRGB(img)
+	return rgb, w, h, nil
+}
+
 // LoadImage 加载图像并返回 [0, 1] 范围的 float32 RGB
 func LoadImage(path string) ([]float32, int, int, error) {
 	f, err := os.Open(path)
@@ -105,12 +138,18 @@ func LoadImage(path string) ([]float32, int, int, error) {
 	}
 	defer f.Close()
 
-	img, _, err := image.Decode(f)
-	if err != nil {
-		return nil, 0, 0, err
+	img, _, decodeErr := image.Decode(f)
+	if decodeErr == nil {
+		rgb, w, h := imageToFloatRGB(img)
+		return rgb, w, h, nil
 	}
-	rgb, w, h := imageToFloatRGB(img)
-	return rgb, w, h, nil
+
+	// 原生解码失败时，无缝回退至内置 FFmpeg 管道解码
+	if rgb, w, h, ffErr := decodeWithFFmpeg(path); ffErr == nil {
+		return rgb, w, h, nil
+	}
+
+	return nil, 0, 0, decodeErr
 }
 
 // DecodeImageFromReader 从 io.Reader 流直接解码图像
@@ -507,7 +546,3 @@ func WriteJPEGToWriter(w io.Writer, rgb []float32, width, height int, quality in
 	return jpeg.Encode(w, outImg, &jpeg.Options{Quality: quality})
 }
 
-func init() {
-	image.RegisterFormat("jpeg", "\xff\xd8", jpeg.Decode, jpeg.DecodeConfig)
-	image.RegisterFormat("png", "\x89PNG\r\n\x1a\n", png.Decode, png.DecodeConfig)
-}
